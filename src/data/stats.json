@@ -1,0 +1,25 @@
+{
+  "updated_at": "2026-03-04T17:24:42.235Z",
+  "search": {
+    "total_lines": 1373,
+    "parsed_lines": 1373,
+    "found": 1080,
+    "not_found": 0,
+    "errors": 0,
+    "started_from": 1180,
+    "finished": true,
+    "stopped_by_429": false,
+    "last_index": 1373
+  },
+  "likes": {
+    "total_found": 1080,
+    "processed": 0,
+    "liked": 0,
+    "already_liked": 0,
+    "skipped_by_state": 0,
+    "errors": 1,
+    "finished": false,
+    "stopped_by_429": true,
+    "last_index": 1
+  }
+}
