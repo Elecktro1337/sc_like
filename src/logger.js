@@ -11,11 +11,42 @@ export function ts() {
 	return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
-export function makeLogger({ errorsLogPath }) {
-	const writeErr = (line) => {
+function safeStringify(value) {
+	try {
+		return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+	} catch {
+		return String(value);
+	}
+}
+
+function sanitizeHeaders(headers) {
+	if (!headers || typeof headers !== "object") return headers;
+	
+	const out = { ...headers };
+	
+	for (const key of Object.keys(out)) {
+		if (key.toLowerCase() === "authorization") {
+			out[key] = "OAuth <hidden>";
+		}
+	}
+	
+	return out;
+}
+
+export function makeLogger({ errorsLogPath, requestsLogPath = null }) {
+	const writeLine = (targetPath, line) => {
 		try {
-			fs.mkdirSync(path.dirname(errorsLogPath), { recursive: true });
-			fs.appendFileSync(errorsLogPath, line + "\n", "utf8");
+			fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+			fs.appendFileSync(targetPath, line + "\n", "utf8");
+		} catch {
+			// ignore
+		}
+	};
+	
+	const clearLogFile = (targetPath) => {
+		try {
+			fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+			fs.writeFileSync(targetPath, "", "utf8");
 		} catch {
 			// ignore
 		}
@@ -24,6 +55,12 @@ export function makeLogger({ errorsLogPath }) {
 	const fmt = (lvl, msg) => `${ts()} [ ${lvl} ] ${msg}`;
 	
 	return {
+		clearErrorsLog() {
+			clearLogFile(errorsLogPath);
+		},
+		clearRequestsLog() {
+			if (requestsLogPath) clearLogFile(requestsLogPath);
+		},
 		info(msg) {
 			console.log(chalk.cyan(fmt("I", msg)));
 		},
@@ -33,13 +70,29 @@ export function makeLogger({ errorsLogPath }) {
 		error(msg, errObj = null) {
 			console.log(chalk.red(fmt("E", msg)));
 			if (errObj) {
-				const dump =
-					typeof errObj === "string"
-						? errObj
-						: JSON.stringify(errObj, null, 2);
-				writeErr(`${fmt("E", msg)}\n${dump}\n---`);
+				writeLine(errorsLogPath, `${fmt("E", msg)}\n${safeStringify(errObj)}\n---`);
 			} else {
-				writeErr(fmt("E", msg));
+				writeLine(errorsLogPath, fmt("E", msg));
+			}
+		},
+		request(event, payload = null) {
+			if (!requestsLogPath) return;
+			
+			let prepared = payload;
+			if (payload && typeof payload === "object") {
+				prepared = { ...payload };
+				if (prepared.headers) {
+					prepared.headers = sanitizeHeaders(prepared.headers);
+				}
+				if (prepared.requestHeaders) {
+					prepared.requestHeaders = sanitizeHeaders(prepared.requestHeaders);
+				}
+			}
+			
+			if (prepared) {
+				writeLine(requestsLogPath, `${fmt("R", event)}\n${safeStringify(prepared)}\n---`);
+			} else {
+				writeLine(requestsLogPath, fmt("R", event));
 			}
 		}
 	};

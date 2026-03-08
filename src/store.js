@@ -24,11 +24,67 @@ export function readJson(filePath, fallback = null) {
 	}
 }
 
+function sleepSync(ms) {
+	const end = Date.now() + ms;
+	while (Date.now() < end) {
+		// busy wait is ugly, but tiny and dependency-free for short Windows FS retries
+	}
+}
+
 export function writeJson(filePath, data) {
 	const tmp = `${filePath}.tmp`;
+	const serialized = JSON.stringify(data, null, 2);
+	
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
-	fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf8");
-	fs.renameSync(tmp, filePath);
+	
+	let lastError = null;
+	
+	for (let attempt = 0; attempt < 5; attempt++) {
+		try {
+			fs.writeFileSync(tmp, serialized, "utf8");
+			
+			try {
+				fs.renameSync(tmp, filePath);
+			} catch (renameError) {
+				if (exists(filePath)) {
+					try {
+						fs.unlinkSync(filePath);
+					} catch {
+						// ignore
+					}
+				}
+				fs.renameSync(tmp, filePath);
+			}
+			
+			return;
+		} catch (e) {
+			lastError = e;
+			
+			try {
+				if (exists(tmp)) fs.unlinkSync(tmp);
+			} catch {
+				// ignore
+			}
+			
+			sleepSync(40 * (attempt + 1));
+		}
+	}
+	
+	try {
+		fs.writeFileSync(filePath, serialized, "utf8");
+		return;
+	} catch (e) {
+		throw lastError || e;
+	}
+}
+
+export function writeText(filePath, text) {
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	fs.writeFileSync(filePath, text, "utf8");
+}
+
+export function clearFile(filePath) {
+	writeText(filePath, "");
 }
 
 export function appendText(filePath, line) {

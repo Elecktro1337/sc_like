@@ -1,25 +1,38 @@
 {
-  "updated_at": "2026-03-07T04:13:55.306Z",
+  "updated_at": "2026-03-08T03:11:37.359Z",
   "search": {
     "total_lines": 1373,
     "parsed_lines": 1373,
-    "found": 1080,
-    "not_found": 0,
+    "found": 74,
+    "not_found": 28,
     "errors": 0,
-    "started_from": 1180,
-    "finished": true,
+    "started_from": 9,
+    "finished": false,
     "stopped_by_429": false,
-    "last_index": 1373
+    "last_index": 110
   },
   "likes": {
     "total_found": 1080,
-    "processed": 155,
-    "liked": 1,
+    "processed": 243,
+    "liked": 24,
     "already_liked": 0,
-    "skipped_by_state": 154,
+    "skipped_by_state": 219,
+    "errors": 1,
+    "finished": false,
+    "stopped_by_429": true,
+    "last_index": 244
+  },
+  "playlist": {
+    "total_found": 1080,
+    "processed": 66,
+    "added": 21,
+    "already_in_playlist": 0,
+    "skipped_by_state": 45,
     "errors": 0,
     "finished": false,
     "stopped_by_429": false,
-    "last_index": 155
+    "last_index": 66,
+    "target_title": "test",
+    "target_url": "https://soundcloud.com/elecktro1337/sets/test"
   }
 }

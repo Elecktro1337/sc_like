@@ -19,7 +19,8 @@ import {
 	appendText,
 	resolveRel,
 	sleep,
-	sha256File
+	sha256File,
+	clearFile
 } from "./store.js";
 import { makeLogger } from "./logger.js";
 import { exchangeTokenAuthCode, refreshToken, makePkce } from "./oauth.js";
@@ -32,12 +33,16 @@ const APP_AUTHOR = "elecktro1337 (t.me/elecktro1337)";
 
 const DATA_DIR = resolveRel("data");
 const CONFIGS_DIR = resolveRel("data", "configs");
+const PLAYLISTS_DIR = resolveRel("data", "playlists");
+
 const TOKENS_PATH = resolveRel("data", "tokens.json");
 const FOUND_PATH = resolveRel("data", "found_tracks.json");
 const NOT_FOUND_PATH = resolveRel("data", "not_found.txt");
 const STATE_SEARCH_PATH = resolveRel("data", "state_search.json");
 const STATE_LIKES_PATH = resolveRel("data", "state_likes.json");
+const STATE_PLAYLISTS_PATH = resolveRel("data", "state_playlists.json");
 const ERRORS_LOG_PATH = resolveRel("data", "errors.log");
+const REQUESTS_LOG_PATH = resolveRel("data", "requests.log");
 const STATS_PATH = resolveRel("data", "stats.json");
 const TRACKS_TXT = resolveRel("tracks.txt");
 
@@ -47,7 +52,7 @@ const MAX_DELAY_MS = 2 * 60 * 1000;
 // экспоненциальное смещение к коротким задержкам
 const getLikeDelayMs = () => {
 	const u = Math.random();
-	const k = 9; // чем больше, тем сильнее тянет к коротким
+	const k = 9;
 	const t = 1 - Math.exp(-k * u);
 	return Math.floor(MIN_DELAY_MS + t * (MAX_DELAY_MS - MIN_DELAY_MS));
 };
@@ -55,7 +60,10 @@ const getLikeDelayMs = () => {
 const SEARCH_DELAY_MS = 200;
 const SEARCH_LIMIT = 30;
 
-const log = makeLogger({ errorsLogPath: ERRORS_LOG_PATH });
+const log = makeLogger({
+	errorsLogPath: ERRORS_LOG_PATH,
+	requestsLogPath: REQUESTS_LOG_PATH
+});
 
 function clearConsole() {
 	process.stdout.write("\x1Bc");
@@ -64,23 +72,85 @@ function clearConsole() {
 function header() {
 	const art = figlet.textSync("SC Like", { horizontalLayout: "default" });
 	console.log(chalk.green(art));
-	console.log(chalk.gray("Версия 1.0.4\n"));
-	console.log(chalk.gray("Автор: Nikita Shikhovtsev (elecktro1337)\n"));
+	console.log(chalk.gray("Версия 1.1.0\n"));
+	console.log(chalk.gray(`Автор: ${APP_AUTHOR}\n`));
 }
 
 function nowSec() {
 	return Math.floor(Date.now() / 1000);
 }
 
-function safeId(x) {
-	const n = Number(x);
-	return Number.isFinite(n) ? n : null;
+function safeResourceRef(resourceOrValue) {
+	if (resourceOrValue == null) {
+		return { id: null, urn: null, key: null };
+	}
+	
+	if (typeof resourceOrValue === "number") {
+		const id = Number.isFinite(resourceOrValue) ? String(resourceOrValue) : null;
+		return { id, urn: null, key: id };
+	}
+	
+	if (typeof resourceOrValue === "string") {
+		const value = resourceOrValue.trim();
+		if (!value) return { id: null, urn: null, key: null };
+		
+		if (/^soundcloud:/i.test(value)) {
+			const numericTail = value.match(/:(\d+)$/);
+			return {
+				id: numericTail ? numericTail[1] : null,
+				urn: value,
+				key: value
+			};
+		}
+		
+		if (/^\d+$/.test(value)) {
+			return { id: value, urn: null, key: value };
+		}
+		
+		return { id: null, urn: null, key: value };
+	}
+	
+	if (typeof resourceOrValue === "object") {
+		const key =
+			(typeof resourceOrValue.key === "string" && resourceOrValue.key.trim()) ||
+			null;
+		
+		const urn =
+			(typeof resourceOrValue.urn === "string" && resourceOrValue.urn.trim()) ||
+			null;
+		
+		const idRaw =
+			typeof resourceOrValue.id === "number"
+				? String(resourceOrValue.id)
+				: (typeof resourceOrValue.id === "string" && resourceOrValue.id.trim()) || null;
+		
+		const id =
+			idRaw && /^\d+$/.test(idRaw)
+				? idRaw
+				: urn && /:(\d+)$/.test(urn)
+					? urn.match(/:(\d+)$/)[1]
+					: null;
+		
+		return {
+			id,
+			urn,
+			key: key || urn || id
+		};
+	}
+	
+	return { id: null, urn: null, key: null };
+}
+
+function safeResourceKey(resourceOrValue) {
+	return safeResourceRef(resourceOrValue).key;
+}
+
+function safeNumericId(resourceOrValue) {
+	return safeResourceRef(resourceOrValue).id;
 }
 
 function initStats() {
-	const base = readJson(STATS_PATH, null);
-	if (base) return base;
-	const fresh = {
+	const defaults = {
 		updated_at: null,
 		search: {
 			total_lines: 0,
@@ -103,15 +173,58 @@ function initStats() {
 			finished: false,
 			stopped_by_429: false,
 			last_index: 0
+		},
+		playlist: {
+			total_found: 0,
+			processed: 0,
+			added: 0,
+			already_in_playlist: 0,
+			skipped_by_state: 0,
+			errors: 0,
+			finished: false,
+			stopped_by_429: false,
+			last_index: 0,
+			target_title: null,
+			target_url: null
 		}
 	};
-	writeJson(STATS_PATH, fresh);
-	return fresh;
+	
+	const base = readJson(STATS_PATH, null);
+	
+	if (!base || typeof base !== "object") {
+		writeJson(STATS_PATH, defaults);
+		return defaults;
+	}
+	
+	const normalized = {
+		updated_at: base.updated_at ?? null,
+		search: {
+			...defaults.search,
+			...(base.search || {})
+		},
+		likes: {
+			...defaults.likes,
+			...(base.likes || {})
+		},
+		playlist: {
+			...defaults.playlist,
+			...(base.playlist || {})
+		}
+	};
+	
+	writeJson(STATS_PATH, normalized);
+	return normalized;
 }
 
 function saveStats(stats) {
 	stats.updated_at = new Date().toISOString();
 	writeJson(STATS_PATH, stats);
+}
+
+function initLogFiles() {
+	ensureDir(DATA_DIR);
+	clearFile(ERRORS_LOG_PATH);
+	clearFile(REQUESTS_LOG_PATH);
 }
 
 async function selectOrCreateConfig() {
@@ -149,6 +262,7 @@ async function selectOrCreateConfig() {
 		if (!cfg?.client_id || !cfg?.client_secret || !cfg?.redirect_uri) {
 			throw new Error("Конфиг битый/неполный. Удали его и создай заново.");
 		}
+		
 		log.info(`Конфиг загружен: ${file}`);
 		return cfg;
 	}
@@ -183,10 +297,12 @@ async function createConfig() {
 	return cfg;
 }
 
-async function getValidTokens(cfg) {
+async function getValidTokens(cfg, forceRefresh = false) {
 	const tok = readJson(TOKENS_PATH, null);
 	
-	if (tok?.access_token && tok?.expires_at && tok.expires_at - nowSec() > 60) return tok;
+	if (!forceRefresh && tok?.access_token && tok?.expires_at && tok.expires_at - nowSec() > 60) {
+		return tok;
+	}
 	
 	if (tok?.refresh_token) {
 		log.info("Обновляю токен (refresh_token)...");
@@ -218,6 +334,7 @@ async function getValidTokens(cfg) {
 	authorizeUrl.searchParams.set("state", state);
 	
 	log.info("Открываю браузер для авторизации...");
+	
 	const code = await new Promise((resolve, reject) => {
 		const server = http.createServer((req, res) => {
 			try {
@@ -239,6 +356,7 @@ async function getValidTokens(cfg) {
 					reject(new Error(`OAuth error: ${err}`));
 					return;
 				}
+				
 				if (!gotCode) {
 					res.writeHead(400);
 					res.end("Missing code");
@@ -246,6 +364,7 @@ async function getValidTokens(cfg) {
 					reject(new Error("Missing code"));
 					return;
 				}
+				
 				if (gotState !== state) {
 					res.writeHead(400);
 					res.end("State mismatch");
@@ -270,6 +389,7 @@ async function getValidTokens(cfg) {
 	});
 	
 	log.info("Обмениваю code -> token...");
+	
 	const exchanged = await exchangeTokenAuthCode({
 		clientId: cfg.client_id,
 		clientSecret: cfg.client_secret,
@@ -286,12 +406,178 @@ async function getValidTokens(cfg) {
 function initFiles() {
 	ensureDir(DATA_DIR);
 	ensureDir(CONFIGS_DIR);
+	ensureDir(PLAYLISTS_DIR);
 	
 	if (!exists(FOUND_PATH)) writeJson(FOUND_PATH, { generated_at: null, tracks_hash: null, found: [] });
 	if (!exists(STATE_SEARCH_PATH)) writeJson(STATE_SEARCH_PATH, { tracks_hash: null, next_index: 0, total: 0, updated_at: null });
 	if (!exists(STATE_LIKES_PATH)) writeJson(STATE_LIKES_PATH, { liked_ids: {}, updated_at: null });
+	if (!exists(STATE_PLAYLISTS_PATH)) writeJson(STATE_PLAYLISTS_PATH, { playlists: {}, updated_at: null });
 	if (!exists(NOT_FOUND_PATH)) appendText(NOT_FOUND_PATH, "# not found (Artist - Title) — appended");
 	if (!exists(STATS_PATH)) initStats();
+}
+
+async function selectActionMode() {
+	const { mode } = await inquirer.prompt([
+		{
+			type: "list",
+			name: "mode",
+			message: "Режим работы:",
+			choices: [
+				{ name: "Лайкинг треков", value: "like" },
+				{ name: "Добавление треков в плейлист", value: "playlist" }
+			]
+		}
+	]);
+	
+	return mode;
+}
+
+function normalizePlaylistProfile(saved, fallbackName = "playlist") {
+	const ref = safeResourceRef(saved);
+	return {
+		name: saved?.name || fallbackName,
+		url: saved?.url || null,
+		title: saved?.title || saved?.name || fallbackName,
+		key: ref.key,
+		id: ref.id,
+		urn: ref.urn,
+		secret_token: saved?.secret_token || null
+	};
+}
+
+async function resolvePlaylistProfile(sc, saved, fileName = "playlist.json") {
+	const normalized = normalizePlaylistProfile(saved, fileName.replace(/\.json$/i, ""));
+	
+	if (!normalized.url) {
+		throw new Error("Профиль плейлиста битый/неполный. Удали его и создай заново.");
+	}
+	
+	const canUseSavedRef = normalized.key || normalized.id || normalized.urn;
+	if (canUseSavedRef) {
+		try {
+			const actual = await sc.getPlaylist(normalized.key || normalized.urn || normalized.id);
+			return {
+				name: normalized.name,
+				url: normalized.url,
+				title: actual?.title || normalized.title,
+				key: safeResourceKey(actual),
+				id: safeNumericId(actual),
+				urn: safeResourceRef(actual).urn,
+				secret_token: actual?.secret_token || normalized.secret_token || null
+			};
+		} catch {
+			// fallback ниже
+		}
+	}
+	
+	const matched = await sc.findMyPlaylistByUrl(normalized.url);
+	if (!matched) {
+		throw new Error(`Не удалось найти твой плейлист по ссылке: ${normalized.url}`);
+	}
+	
+	return {
+		name: normalized.name,
+		url: normalized.url,
+		title: matched.title || normalized.title,
+		key: safeResourceKey(matched),
+		id: safeNumericId(matched),
+		urn: safeResourceRef(matched).urn,
+		secret_token: matched?.secret_token || null
+	};
+}
+
+async function selectOrCreatePlaylist(sc) {
+	ensureDir(PLAYLISTS_DIR);
+	const playlists = listJsonFiles(PLAYLISTS_DIR);
+	
+	const { mode } = await inquirer.prompt([
+		{
+			type: "list",
+			name: "mode",
+			message: "Плейлист SoundCloud:",
+			choices: [
+				{ name: "Выбрать существующий", value: "load" },
+				{ name: "Создать новый", value: "create" }
+			]
+		}
+	]);
+	
+	if (mode === "load") {
+		if (!playlists.length) {
+			log.warn("Нет сохранённых плейлистов. Создаём новый.");
+			return await createPlaylistProfile(sc);
+		}
+		
+		const { file } = await inquirer.prompt([
+			{
+				type: "list",
+				name: "file",
+				message: "Выбери плейлист:",
+				choices: playlists.map((p) => ({ name: p, value: p }))
+			}
+		]);
+		
+		const saved = readJson(resolveRel("data", "playlists", file), null);
+		const resolved = await resolvePlaylistProfile(sc, saved, file);
+		
+		writeJson(resolveRel("data", "playlists", file), {
+			name: resolved.name,
+			url: resolved.url,
+			title: resolved.title,
+			key: resolved.key,
+			id: resolved.id,
+			urn: resolved.urn,
+			secret_token: resolved.secret_token
+		});
+		
+		log.info(`Плейлист загружен: ${resolved.title}`);
+		return resolved;
+	}
+	
+	return await createPlaylistProfile(sc);
+}
+
+async function createPlaylistProfile(sc) {
+	const answers = await inquirer.prompt([
+		{
+			type: "input",
+			name: "name",
+			message: "Имя профиля плейлиста (например: techno-main):",
+			default: "main-playlist"
+		},
+		{
+			type: "input",
+			name: "url",
+			message: "Ссылка на твой плейлист SoundCloud:"
+		}
+	]);
+	
+	const matched = await sc.findMyPlaylistByUrl(answers.url);
+	if (!matched) {
+		throw new Error("Не удалось найти этот плейлист среди /me/playlists. Убедись, что ссылка ведёт именно на твой плейлист.");
+	}
+	
+	const payload = {
+		name: answers.name,
+		url: answers.url,
+		key: safeResourceKey(matched),
+		id: safeNumericId(matched),
+		urn: safeResourceRef(matched).urn,
+		secret_token: matched?.secret_token || null,
+		title: matched.title || answers.name
+	};
+	
+	if (!payload.key) {
+		throw new Error("Не удалось определить идентификатор плейлиста.");
+	}
+	
+	const fileName = `${answers.name}.json`;
+	const path = resolveRel("data", "playlists", fileName);
+	
+	writeJson(path, payload);
+	log.info(`Плейлист сохранён: ${fileName}`);
+	
+	return payload;
 }
 
 async function chooseSearchMode(tracksHash) {
@@ -306,7 +592,7 @@ async function chooseSearchMode(tracksHash) {
 		searchState.next_index < (searchState.total || Number.MAX_SAFE_INTEGER);
 	
 	const choices = [];
-	if (cacheValid) choices.push({ name: `Использовать кэш найденных для лайкинга (${cached.found.length})`, value: "use_cache" });
+	if (cacheValid) choices.push({ name: `Использовать кэш найденных (${cached.found.length})`, value: "use_cache" });
 	if (canResume) choices.push({ name: `Продолжить обработку с места остановки (строка ${searchState.next_index + 1})`, value: "resume" });
 	choices.push({ name: "Обработать файл заново с нуля (сбросить кэш/прогресс поиска)", value: "fresh" });
 	
@@ -322,7 +608,6 @@ function loadSearchState() {
 }
 
 function resetSearchProgress(tracksHash, totalLines) {
-	// state_search: начать с нуля
 	writeJson(STATE_SEARCH_PATH, {
 		tracks_hash: tracksHash,
 		next_index: 0,
@@ -330,48 +615,54 @@ function resetSearchProgress(tracksHash, totalLines) {
 		updated_at: new Date().toISOString()
 	});
 	
-	// found cache: очистить
 	writeJson(FOUND_PATH, {
 		generated_at: new Date().toISOString(),
 		tracks_hash: tracksHash,
 		found: []
 	});
-	
-	// not_found: очищать не обязательно (он накопительный), но можно — если хочешь:
-	// fs.writeFileSync(NOT_FOUND_PATH, "# not found ...\n", "utf8");
 }
 
 function saveSearchState(st) {
 	st.updated_at = new Date().toISOString();
 	writeJson(STATE_SEARCH_PATH, st);
 }
+
 function loadFoundCache() {
 	return readJson(FOUND_PATH, { generated_at: null, tracks_hash: null, found: [] });
 }
+
 function saveFoundCache(cache) {
 	cache.generated_at = new Date().toISOString();
 	writeJson(FOUND_PATH, cache);
 }
+
 function loadLikesState() {
 	return readJson(STATE_LIKES_PATH, { liked_ids: {}, updated_at: null });
 }
+
 function saveLikesState(st) {
 	st.updated_at = new Date().toISOString();
 	writeJson(STATE_LIKES_PATH, st);
 }
 
-// главное: безопасное логирование при активном прогрессбаре
-function withBarLog(bar, fn) {
-	if (bar) bar.stop();
-	fn();
-	if (bar) bar.start();
+function loadPlaylistsState() {
+	const base = readJson(STATE_PLAYLISTS_PATH, { playlists: {}, updated_at: null });
+	return {
+		playlists: base?.playlists && typeof base.playlists === "object" ? base.playlists : {},
+		updated_at: base?.updated_at ?? null
+	};
+}
+
+function savePlaylistsState(st) {
+	st.updated_at = new Date().toISOString();
+	writeJson(STATE_PLAYLISTS_PATH, st);
 }
 
 async function parseTracks(sc, tracksLines, tracksHash, stats) {
 	const spinner = ora({ text: "Подготовка поиска...", spinner: "dots" }).start();
 	
 	stats.search.total_lines = tracksLines.length;
-	stats.search.parsed_lines = tracksLines.length; // по факту — строк в файле (не все могут распарситься)
+	stats.search.parsed_lines = tracksLines.length;
 	stats.search.errors = 0;
 	stats.search.stopped_by_429 = false;
 	stats.search.finished = false;
@@ -439,17 +730,21 @@ async function parseTracks(sc, tracksLines, tracksHash, stats) {
 				stats.search.not_found += 1;
 			} else {
 				const best = pickBestMatch(parsed, results);
+				
 				if (!best) {
 					appendText(NOT_FOUND_PATH, line);
 					stats.search.not_found += 1;
 				} else {
-					const id = safeId(best.id);
-					if (id) {
+					const trackKey = safeResourceKey(best);
+					
+					if (trackKey) {
 						cache.found.push({
 							source_line: line,
 							query: q,
 							track: {
-								id,
+								key: trackKey,
+								id: best.id ?? null,
+								urn: best.urn ?? null,
 								title: best.title,
 								permalink_url: best.permalink_url,
 								user: { username: best.user?.username || "" }
@@ -480,7 +775,6 @@ async function parseTracks(sc, tracksLines, tracksHash, stats) {
 			stats.search.last_index = i + 1;
 			saveStats(stats);
 			
-			// фикс склейки: остановить бар -> лог -> запустить бар обратно
 			bar.stop();
 			log.error(`Ошибка при поиске на строке ${i + 1}: ${line}`, payload || e?.message);
 			
@@ -489,6 +783,10 @@ async function parseTracks(sc, tracksLines, tracksHash, stats) {
 				stats.search.stopped_by_429 = true;
 				saveStats(stats);
 				return { stoppedBy429: true, cache: loadFoundCache() };
+			}
+			
+			if (status === 401 || /не авторизован/i.test(String(e?.message || ""))) {
+				throw new Error("Сессия истекла во время поиска. Токен обновлён не был.");
 			}
 			
 			bar.start(tracksLines.length, i + 1, { line: "" });
@@ -539,15 +837,14 @@ async function likeFlow(sc, foundCache, stats) {
 	
 	for (let i = 0; i < foundCache.found.length; i++) {
 		const item = foundCache.found[i];
-		const id = safeId(item?.track?.id);
+		const trackKey = safeResourceKey(item?.track);
 		const title = item?.track?.title || item?.source_line || "track";
 		
 		bar.update(i + 1, { title: title.length > 42 ? title.slice(0, 39) + "..." : title });
 		
-		if (!id) continue;
+		if (!trackKey) continue;
 		
-		// state skip
-		if (likesState.liked_ids[String(id)]) {
+		if (likesState.liked_ids[trackKey]) {
 			stats.likes.skipped_by_state += 1;
 			stats.likes.processed += 1;
 			stats.likes.last_index = i + 1;
@@ -556,9 +853,9 @@ async function likeFlow(sc, foundCache, stats) {
 		}
 		
 		try {
-			const liked = await sc.isTrackLikedBestEffort(id);
+			const liked = await sc.isTrackLikedBestEffort(trackKey);
 			if (liked === true) {
-				likesState.liked_ids[String(id)] = { at: new Date().toISOString(), status: "already-liked" };
+				likesState.liked_ids[trackKey] = { at: new Date().toISOString(), status: "already-liked" };
 				saveLikesState(likesState);
 				
 				stats.likes.already_liked += 1;
@@ -568,9 +865,9 @@ async function likeFlow(sc, foundCache, stats) {
 				continue;
 			}
 			
-			await sc.likeTrack(id);
+			await sc.likeTrack(trackKey);
 			
-			likesState.liked_ids[String(id)] = { at: new Date().toISOString(), status: "liked" };
+			likesState.liked_ids[trackKey] = { at: new Date().toISOString(), status: "liked" };
 			saveLikesState(likesState);
 			
 			stats.likes.liked += 1;
@@ -597,7 +894,7 @@ async function likeFlow(sc, foundCache, stats) {
 			}
 			
 			if (status === 409) {
-				likesState.liked_ids[String(id)] = { at: new Date().toISOString(), status: "already-liked" };
+				likesState.liked_ids[trackKey] = { at: new Date().toISOString(), status: "already-liked" };
 				saveLikesState(likesState);
 				
 				stats.likes.already_liked += 1;
@@ -608,7 +905,11 @@ async function likeFlow(sc, foundCache, stats) {
 				continue;
 			}
 			
-			log.error(`Ошибка лайка (id=${id}, title="${title}")`, payload || e?.message);
+			if (status === 401 || /не авторизован/i.test(String(e?.message || ""))) {
+				throw new Error("Сессия истекла во время лайков. Операция остановлена.");
+			}
+			
+			log.error(`Ошибка лайка (id=${trackKey}, title="${title}")`, payload || e?.message);
 			
 			bar.start(foundCache.found.length, i + 1, { title: "" });
 			await sleep(1200);
@@ -623,7 +924,210 @@ async function likeFlow(sc, foundCache, stats) {
 	return { stoppedBy429: false };
 }
 
+function playlistContainsTrack(playlist, trackRef) {
+	const wantedId = safeNumericId(trackRef);
+	const wantedKey = safeResourceKey(trackRef);
+	
+	const tracks = Array.isArray(playlist?.tracks) ? playlist.tracks : [];
+	for (const t of tracks) {
+		const existingId = safeNumericId(t);
+		const existingKey = safeResourceKey(t);
+		
+		if (wantedId && existingId && wantedId === existingId) return true;
+		if (wantedKey && existingKey && wantedKey === existingKey) return true;
+	}
+	
+	return false;
+}
+
+async function playlistFlow(sc, playlistProfile, foundCache, stats) {
+	if (!playlistProfile || !playlistProfile.key) {
+		throw new Error("Не выбран или некорректно определён плейлист.");
+	}
+	
+	const playlistsState = loadPlaylistsState();
+	const playlistStateKey = playlistProfile.id || playlistProfile.key;
+	
+	if (!playlistsState.playlists[playlistStateKey]) {
+		playlistsState.playlists[playlistStateKey] = {
+			added_ids: {},
+			title: playlistProfile.title || playlistProfile.name || "playlist",
+			url: playlistProfile.url
+		};
+		savePlaylistsState(playlistsState);
+	}
+	
+	const playlistState = playlistsState.playlists[playlistStateKey];
+	
+	stats.playlist.total_found = foundCache.found.length;
+	stats.playlist.processed = 0;
+	stats.playlist.added = 0;
+	stats.playlist.already_in_playlist = 0;
+	stats.playlist.skipped_by_state = 0;
+	stats.playlist.errors = 0;
+	stats.playlist.finished = false;
+	stats.playlist.stopped_by_429 = false;
+	stats.playlist.last_index = 0;
+	stats.playlist.target_title = playlistProfile.title || null;
+	stats.playlist.target_url = playlistProfile.url || null;
+	saveStats(stats);
+	
+	log.info(`Загружаю текущий состав плейлиста: ${playlistProfile.title}`);
+	
+	let playlist = await sc.getPlaylist(playlistProfile.key);
+	if (!playlistProfile.secret_token && playlist?.secret_token) {
+		playlistProfile.secret_token = playlist.secret_token;
+	}
+	const existingTracks = Array.isArray(playlist?.tracks) ? playlist.tracks : [];
+	const existingSet = new Set(
+		existingTracks
+		.map((t) => safeNumericId(t) || safeResourceKey(t))
+		.filter(Boolean)
+	);
+	
+	let playlistTracks = existingTracks
+	.map((t) => ({
+		id: safeNumericId(t) ? Number(safeNumericId(t)) : null,
+		urn: safeResourceRef(t).urn || null
+	}))
+	.filter((t) => t.id || t.urn);
+	
+	log.info(
+		`Плейлист "${playlistProfile.title}": ` +
+		`уже внутри ${existingSet.size} треков, ` +
+		`к обработке найдено ${foundCache.found.length}.`
+	);
+	
+	const bar = new cliProgress.SingleBar(
+		{
+			format: `${chalk.magenta("{bar}")} {percentage}% | {value}/{total} | {title}`,
+			barCompleteChar: "█",
+			barIncompleteChar: "░",
+			hideCursor: true
+		},
+		cliProgress.Presets.shades_classic
+	);
+	
+	bar.start(foundCache.found.length, 0, { title: "" });
+	
+	for (let i = 0; i < foundCache.found.length; i++) {
+		const item = foundCache.found[i];
+		const trackKey = safeNumericId(item?.track) || safeResourceKey(item?.track);
+		const title = item?.track?.title || item?.source_line || "track";
+		
+		bar.update(i + 1, { title: title.length > 42 ? title.slice(0, 39) + "..." : title });
+		
+		if (!trackKey) continue;
+		
+		if (playlistState.added_ids[trackKey]) {
+			stats.playlist.skipped_by_state += 1;
+			stats.playlist.processed += 1;
+			stats.playlist.last_index = i + 1;
+			saveStats(stats);
+			continue;
+		}
+		
+		if (existingSet.has(trackKey)) {
+			playlistState.added_ids[trackKey] = {
+				at: new Date().toISOString(),
+				status: "already-in-playlist"
+			};
+			savePlaylistsState(playlistsState);
+			
+			stats.playlist.already_in_playlist += 1;
+			stats.playlist.processed += 1;
+			stats.playlist.last_index = i + 1;
+			saveStats(stats);
+			continue;
+		}
+		
+		try {
+			const trackIdNum = safeNumericId(item?.track);
+			const trackUrn = safeResourceRef(item?.track).urn || null;
+			
+			if (!trackIdNum && !trackUrn) {
+				throw new Error(`Некорректный track ref: ${trackKey}`);
+			}
+			
+			playlistTracks.push({
+				id: trackIdNum ? Number(trackIdNum) : null,
+				urn: trackUrn
+			});
+			
+			await sc.updatePlaylistTracks(playlistProfile.key, playlistTracks, {
+				secretToken: playlistProfile.secret_token || null
+			});
+			
+			playlist = await sc.getPlaylist(playlistProfile.key);
+			if (!playlistContainsTrack(playlist, item?.track)) {
+				playlistTracks.pop();
+				throw new Error(
+					`SoundCloud принял запрос, но трек не появился в плейлисте после повторной проверки (track=${trackKey}).`
+				);
+			}
+			
+			existingSet.add(trackKey);
+			playlistState.added_ids[trackKey] = {
+				at: new Date().toISOString(),
+				status: "added"
+			};
+			savePlaylistsState(playlistsState);
+			
+			stats.playlist.added += 1;
+			stats.playlist.processed += 1;
+			stats.playlist.last_index = i + 1;
+			saveStats(stats);
+			
+			await sleep(1200);
+		} catch (e) {
+			const status = e?.response?.status;
+			const payload = e?.response?.data;
+			
+			stats.playlist.errors += 1;
+			stats.playlist.last_index = i + 1;
+			saveStats(stats);
+			
+			bar.stop();
+			
+			if (status === 429) {
+				log.error("Получен 429 при добавлении в плейлист. Немедленная остановка. Прогресс сохранён.", payload || e?.message);
+				stats.playlist.stopped_by_429 = true;
+				saveStats(stats);
+				return { stoppedBy429: true };
+			}
+			
+			if (status === 401 || /не авторизован/i.test(String(e?.message || ""))) {
+				throw new Error("Сессия истекла во время добавления в плейлист. Операция остановлена.");
+			}
+			
+			if (playlistTracks.length) {
+				playlistTracks.pop();
+			}
+			
+			log.error(`Ошибка добавления в плейлист (track=${trackKey}, title="${title}")`, payload || e?.message);
+			
+			bar.start(foundCache.found.length, i + 1, { title: "" });
+			await sleep(1200);
+		}
+	}
+	
+	bar.stop();
+	stats.playlist.finished = true;
+	saveStats(stats);
+	
+	log.info(
+		`Добавление в плейлист завершено. ` +
+		`Добавлено: ${stats.playlist.added}, ` +
+		`уже были в плейлисте: ${stats.playlist.already_in_playlist}, ` +
+		`пропущено по state: ${stats.playlist.skipped_by_state}, ` +
+		`ошибок: ${stats.playlist.errors}.`
+	);
+	
+	return { stoppedBy429: false };
+}
+
 async function main() {
+	initLogFiles();
 	initFiles();
 	const stats = initStats();
 	
@@ -636,9 +1140,18 @@ async function main() {
 	}
 	
 	const cfg = await selectOrCreateConfig();
-	const tokens = await getValidTokens(cfg);
+	let tokens = await getValidTokens(cfg);
 	
-	const sc = new SoundCloudClient({ accessToken: tokens.access_token });
+	const sc = new SoundCloudClient({
+		accessToken: tokens.access_token,
+		clientId: cfg.client_id,
+		onUnauthorized: async () => {
+			const fresh = await getValidTokens(cfg, true);
+			tokens = fresh;
+			return fresh;
+		},
+		logger: log
+	});
 	
 	const spinner = ora({ text: "Проверка авторизации...", spinner: "dots" }).start();
 	const me = await sc.me();
@@ -647,13 +1160,21 @@ async function main() {
 	const username = me?.username || me?.full_name || String(me?.id || "");
 	log.info(`Авторизован пользователь SoundCloud: ${username}`);
 	
+	const actionMode = await selectActionMode();
+	
+	let playlistProfile = null;
+	if (actionMode === "playlist") {
+		playlistProfile = await selectOrCreatePlaylist(sc);
+		log.info(`Выбран плейлист: ${playlistProfile.title} (${playlistProfile.url})`);
+	}
+	
 	const tracksHash = sha256File(TRACKS_TXT);
 	const lines = readTextLines(TRACKS_TXT);
 	
-	// сброс счётчиков поиска/лайков (но оставляем накопленный state в файлах)
 	stats.search.found = 0;
 	stats.search.not_found = 0;
 	stats.search.errors = 0;
+	saveStats(stats);
 	
 	const mode = await chooseSearchMode(tracksHash);
 	
@@ -661,7 +1182,6 @@ async function main() {
 	
 	if (mode === "use_cache") {
 		log.info("Использую кэш найденных треков (поиск не выполняется).");
-		// stats для поиска не трогаем сильно, но можно обновить found из кэша:
 		stats.search.total_lines = lines.length;
 		stats.search.parsed_lines = lines.length;
 		stats.search.found = foundCache.found.length;
@@ -674,7 +1194,6 @@ async function main() {
 			log.info("Продолжаю обработку с места остановки.");
 		}
 		
-		// Обработка (fresh или resume)
 		const res = await parseTracks(sc, lines, tracksHash, stats);
 		foundCache = res.cache;
 		
@@ -687,11 +1206,20 @@ async function main() {
 	stats.search.found = foundCache.found.length;
 	saveStats(stats);
 	
-	const likeRes = await likeFlow(sc, foundCache, stats);
-	
-	if (likeRes.stoppedBy429) {
-		log.warn("Работа остановлена из-за 429 на этапе лайков. Запусти позже — продолжит с места.");
-		return;
+	if (actionMode === "like") {
+		const likeRes = await likeFlow(sc, foundCache, stats);
+		
+		if (likeRes.stoppedBy429) {
+			log.warn("Работа остановлена из-за 429 на этапе лайков. Запусти позже — продолжит с места.");
+			return;
+		}
+	} else {
+		const playlistRes = await playlistFlow(sc, playlistProfile, foundCache, stats);
+		
+		if (playlistRes.stoppedBy429) {
+			log.warn("Работа остановлена из-за 429 на этапе добавления в плейлист. Запусти позже — продолжит с места.");
+			return;
+		}
 	}
 	
 	log.info("Готово.");
