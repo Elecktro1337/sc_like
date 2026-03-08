@@ -48,6 +48,7 @@ const TRACKS_TXT = resolveRel("tracks.txt");
 
 const MIN_DELAY_MS = 1500;
 const MAX_DELAY_MS = 2 * 60 * 1000;
+const PLAYLIST_TRACK_LIMIT = 250;
 
 // экспоненциальное смещение к коротким задержкам
 const getLikeDelayMs = () => {
@@ -185,7 +186,8 @@ function initStats() {
 			stopped_by_429: false,
 			last_index: 0,
 			target_title: null,
-			target_url: null
+			target_url: null,
+			target_part: 1
 		}
 	};
 	
@@ -411,7 +413,7 @@ function initFiles() {
 	if (!exists(FOUND_PATH)) writeJson(FOUND_PATH, { generated_at: null, tracks_hash: null, found: [] });
 	if (!exists(STATE_SEARCH_PATH)) writeJson(STATE_SEARCH_PATH, { tracks_hash: null, next_index: 0, total: 0, updated_at: null });
 	if (!exists(STATE_LIKES_PATH)) writeJson(STATE_LIKES_PATH, { liked_ids: {}, updated_at: null });
-	if (!exists(STATE_PLAYLISTS_PATH)) writeJson(STATE_PLAYLISTS_PATH, { playlists: {}, updated_at: null });
+	if (!exists(STATE_PLAYLISTS_PATH)) writeJson(STATE_PLAYLISTS_PATH, { playlists: {}, roots: {}, updated_at: null });
 	if (!exists(NOT_FOUND_PATH)) appendText(NOT_FOUND_PATH, "# not found (Artist - Title) — appended");
 	if (!exists(STATS_PATH)) initStats();
 }
@@ -432,6 +434,30 @@ async function selectActionMode() {
 	return mode;
 }
 
+function buildAutoPlaylistProfile() {
+	const now = new Date();
+	const pad2 = (value) => String(value).padStart(2, "0");
+	const year = now.getFullYear();
+	const month = pad2(now.getMonth() + 1);
+	const day = pad2(now.getDate());
+	const hours = pad2(now.getHours());
+	const minutes = pad2(now.getMinutes());
+	const seconds = pad2(now.getSeconds());
+	
+	const stamp = `${year}${month}${day}-${hours}${minutes}${seconds}`;
+	const title = `SC Like ${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+	
+	return {
+		name: `auto-${stamp}`,
+		url: null,
+		title,
+		key: null,
+		id: null,
+		urn: null,
+		secret_token: null
+	};
+}
+
 function normalizePlaylistProfile(saved, fallbackName = "playlist") {
 	const ref = safeResourceRef(saved);
 	return {
@@ -442,6 +468,40 @@ function normalizePlaylistProfile(saved, fallbackName = "playlist") {
 		id: ref.id,
 		urn: ref.urn,
 		secret_token: saved?.secret_token || null
+	};
+}
+
+function slugifyFilePart(value, fallback = "playlist") {
+	const out = String(value || "")
+	.trim()
+	.toLowerCase()
+	.replace(/[^a-z0-9а-яё_-]+/gi, "-")
+	.replace(/-+/g, "-")
+	.replace(/^-+|-+$/g, "");
+	return out || fallback;
+}
+
+function normalizePlaylistRootState(saved, playlistProfile) {
+	return {
+		root_name: saved?.root_name || playlistProfile.name,
+		base_title: saved?.base_title || playlistProfile.title || playlistProfile.name || "playlist",
+		base_url: saved?.base_url || playlistProfile.url || null,
+		active_part: Number.isFinite(saved?.active_part) && saved.active_part > 0 ? saved.active_part : 1,
+		active_playlist_key: saved?.active_playlist_key || playlistProfile.key || null,
+		active_playlist_id: saved?.active_playlist_id || playlistProfile.id || null,
+		parts: saved?.parts && typeof saved.parts === "object"
+			? saved.parts
+			: {
+				1: {
+					key: playlistProfile.key || null,
+					id: playlistProfile.id || null,
+					urn: playlistProfile.urn || null,
+					title: playlistProfile.title || playlistProfile.name || "playlist",
+					url: playlistProfile.url || null,
+					secret_token: playlistProfile.secret_token || null,
+					file_name: `${playlistProfile.name}.json`
+				}
+			}
 	};
 }
 
@@ -580,6 +640,150 @@ async function createPlaylistProfile(sc) {
 	return payload;
 }
 
+function chooseNextPlaylistTitle(baseTitle, partNumber) {
+	if (!partNumber || partNumber <= 1) return baseTitle;
+	return `${baseTitle} ${partNumber}`;
+}
+
+function savePlaylistProfileFile(profile, partNumber) {
+	const suffix = partNumber > 1 ? `-${partNumber}` : "";
+	const fileName = `${slugifyFilePart(profile.name, "playlist")}${suffix}.json`;
+	const path = resolveRel("data", "playlists", fileName);
+	
+	writeJson(path, {
+		name: profile.name,
+		url: profile.url,
+		title: profile.title,
+		key: profile.key,
+		id: profile.id,
+		urn: profile.urn,
+		secret_token: profile.secret_token
+	});
+	
+	return fileName;
+}
+
+function ensureRootPlaylistState(playlistsState, playlistProfile) {
+	const rootKey = playlistProfile.name;
+	
+	if (!playlistsState.roots || typeof playlistsState.roots !== "object") {
+		playlistsState.roots = {};
+	}
+	
+	if (!playlistsState.roots[rootKey]) {
+		playlistsState.roots[rootKey] = normalizePlaylistRootState(null, playlistProfile);
+	}
+	
+	const rootState = normalizePlaylistRootState(playlistsState.roots[rootKey], playlistProfile);
+	playlistsState.roots[rootKey] = rootState;
+	
+	for (const partNo of Object.keys(rootState.parts)) {
+		const part = rootState.parts[partNo];
+		const stateKey = part?.id || part?.key;
+		if (!stateKey) continue;
+		
+		if (!playlistsState.playlists[stateKey]) {
+			playlistsState.playlists[stateKey] = {
+				added_ids: {},
+				title: part.title || rootState.base_title,
+				url: part.url || rootState.base_url,
+				part: Number(partNo)
+			};
+		}
+	}
+	
+	return rootState;
+}
+
+async function activatePlaylistPart(sc, playlistsState, rootState, partNumber, fallbackProfile) {
+	const existingPart = rootState.parts[String(partNumber)];
+	
+	if (existingPart?.key || existingPart?.id || existingPart?.urn) {
+		rootState.active_part = partNumber;
+		rootState.active_playlist_key = existingPart.key || existingPart.urn || existingPart.id || null;
+		rootState.active_playlist_id = existingPart.id || null;
+		savePlaylistsState(playlistsState);
+		
+		return {
+			name: fallbackProfile.name,
+			url: existingPart.url || fallbackProfile.url || null,
+			title: existingPart.title || chooseNextPlaylistTitle(rootState.base_title, partNumber),
+			key: existingPart.key || existingPart.urn || existingPart.id,
+			id: existingPart.id || null,
+			urn: existingPart.urn || null,
+			secret_token: existingPart.secret_token || null
+		};
+	}
+	
+	const title = chooseNextPlaylistTitle(rootState.base_title, partNumber);
+	log.info(`Создаю новый плейлист автоматически: ${title}`);
+	
+	const created = await sc.createPlaylist({
+		title,
+		description: "",
+		sharing: "private",
+		tracks: []
+	});
+	
+	const profile = {
+		name: fallbackProfile.name,
+		url: created?.permalink_url || null,
+		title: created?.title || title,
+		key: safeResourceKey(created),
+		id: safeNumericId(created),
+		urn: safeResourceRef(created).urn,
+		secret_token: created?.secret_token || null
+	};
+	
+	if (!profile.key) {
+		throw new Error(`Не удалось определить идентификатор нового плейлиста: ${title}`);
+	}
+	
+	const fileName = savePlaylistProfileFile(profile, partNumber);
+	
+	rootState.parts[String(partNumber)] = {
+		key: profile.key,
+		id: profile.id,
+		urn: profile.urn,
+		title: profile.title,
+		url: profile.url,
+		secret_token: profile.secret_token,
+		file_name: fileName
+	};
+	rootState.active_part = partNumber;
+	rootState.active_playlist_key = profile.key;
+	rootState.active_playlist_id = profile.id || null;
+	
+	const stateKey = profile.id || profile.key;
+	if (!playlistsState.playlists[stateKey]) {
+		playlistsState.playlists[stateKey] = {
+			added_ids: {},
+			title: profile.title,
+			url: profile.url,
+			part: partNumber
+		};
+	}
+	
+	savePlaylistsState(playlistsState);
+	log.info(`Новый плейлист создан и сохранён в конфиг: ${fileName}`);
+	
+	return profile;
+}
+
+async function ensureWritablePlaylist(sc, playlistsState, rootState, currentProfile) {
+	let activePart = rootState.active_part || 1;
+	let profile = await activatePlaylistPart(sc, playlistsState, rootState, activePart, currentProfile);
+	let playlist = await sc.getPlaylist(profile.key);
+	
+	while ((Array.isArray(playlist?.tracks) ? playlist.tracks.length : 0) >= PLAYLIST_TRACK_LIMIT) {
+		activePart += 1;
+		profile = await activatePlaylistPart(sc, playlistsState, rootState, activePart, currentProfile);
+		playlist = await sc.getPlaylist(profile.key);
+	}
+	
+	return { profile, playlist };
+}
+
 async function chooseSearchMode(tracksHash) {
 	const cached = readJson(FOUND_PATH, null);
 	const cacheValid = cached?.tracks_hash === tracksHash && Array.isArray(cached?.found) && cached.found.length > 0;
@@ -646,9 +850,10 @@ function saveLikesState(st) {
 }
 
 function loadPlaylistsState() {
-	const base = readJson(STATE_PLAYLISTS_PATH, { playlists: {}, updated_at: null });
+	const base = readJson(STATE_PLAYLISTS_PATH, { playlists: {}, roots: {}, updated_at: null });
 	return {
 		playlists: base?.playlists && typeof base.playlists === "object" ? base.playlists : {},
+		roots: base?.roots && typeof base.roots === "object" ? base.roots : {},
 		updated_at: base?.updated_at ?? null
 	};
 }
@@ -941,23 +1146,13 @@ function playlistContainsTrack(playlist, trackRef) {
 }
 
 async function playlistFlow(sc, playlistProfile, foundCache, stats) {
-	if (!playlistProfile || !playlistProfile.key) {
-		throw new Error("Не выбран или некорректно определён плейлист.");
+	if (!playlistProfile) {
+		throw new Error("Не удалось инициализировать профиль плейлиста.");
 	}
 	
 	const playlistsState = loadPlaylistsState();
-	const playlistStateKey = playlistProfile.id || playlistProfile.key;
-	
-	if (!playlistsState.playlists[playlistStateKey]) {
-		playlistsState.playlists[playlistStateKey] = {
-			added_ids: {},
-			title: playlistProfile.title || playlistProfile.name || "playlist",
-			url: playlistProfile.url
-		};
-		savePlaylistsState(playlistsState);
-	}
-	
-	const playlistState = playlistsState.playlists[playlistStateKey];
+	const rootState = ensureRootPlaylistState(playlistsState, playlistProfile);
+	savePlaylistsState(playlistsState);
 	
 	stats.playlist.total_found = foundCache.found.length;
 	stats.playlist.processed = 0;
@@ -970,16 +1165,33 @@ async function playlistFlow(sc, playlistProfile, foundCache, stats) {
 	stats.playlist.last_index = 0;
 	stats.playlist.target_title = playlistProfile.title || null;
 	stats.playlist.target_url = playlistProfile.url || null;
+	stats.playlist.target_part = rootState.active_part || 1;
 	saveStats(stats);
 	
-	log.info(`Загружаю текущий состав плейлиста: ${playlistProfile.title}`);
+	let writable = await ensureWritablePlaylist(sc, playlistsState, rootState, playlistProfile);
+	let currentProfile = writable.profile;
+	let playlist = writable.playlist;
 	
-	let playlist = await sc.getPlaylist(playlistProfile.key);
-	if (!playlistProfile.secret_token && playlist?.secret_token) {
-		playlistProfile.secret_token = playlist.secret_token;
+	stats.playlist.target_title = currentProfile.title || null;
+	stats.playlist.target_url = currentProfile.url || null;
+	stats.playlist.target_part = rootState.active_part || 1;
+	saveStats(stats);
+	
+	log.info(`Активный плейлист для записи: ${currentProfile.title}`);
+	
+	let currentPlaylistStateKey = currentProfile.id || currentProfile.key;
+	if (!playlistsState.playlists[currentPlaylistStateKey]) {
+		playlistsState.playlists[currentPlaylistStateKey] = {
+			added_ids: {},
+			title: currentProfile.title || currentProfile.name || "playlist",
+			url: currentProfile.url || null,
+			part: rootState.active_part || 1
+		};
+		savePlaylistsState(playlistsState);
 	}
-	const existingTracks = Array.isArray(playlist?.tracks) ? playlist.tracks : [];
-	const existingSet = new Set(
+	
+	let existingTracks = Array.isArray(playlist?.tracks) ? playlist.tracks : [];
+	let existingSet = new Set(
 		existingTracks
 		.map((t) => safeNumericId(t) || safeResourceKey(t))
 		.filter(Boolean)
@@ -993,7 +1205,7 @@ async function playlistFlow(sc, playlistProfile, foundCache, stats) {
 	.filter((t) => t.id || t.urn);
 	
 	log.info(
-		`Плейлист "${playlistProfile.title}": ` +
+		`Плейлист "${currentProfile.title}": ` +
 		`уже внутри ${existingSet.size} треков, ` +
 		`к обработке найдено ${foundCache.found.length}.`
 	);
@@ -1019,6 +1231,19 @@ async function playlistFlow(sc, playlistProfile, foundCache, stats) {
 		
 		if (!trackKey) continue;
 		
+		currentPlaylistStateKey = currentProfile.id || currentProfile.key;
+		if (!playlistsState.playlists[currentPlaylistStateKey]) {
+			playlistsState.playlists[currentPlaylistStateKey] = {
+				added_ids: {},
+				title: currentProfile.title || currentProfile.name || "playlist",
+				url: currentProfile.url || null,
+				part: rootState.active_part || 1
+			};
+			savePlaylistsState(playlistsState);
+		}
+		
+		const playlistState = playlistsState.playlists[currentPlaylistStateKey];
+		
 		if (playlistState.added_ids[trackKey]) {
 			stats.playlist.skipped_by_state += 1;
 			stats.playlist.processed += 1;
@@ -1042,6 +1267,37 @@ async function playlistFlow(sc, playlistProfile, foundCache, stats) {
 		}
 		
 		try {
+			if (playlistTracks.length >= PLAYLIST_TRACK_LIMIT) {
+				log.info(`Достигнут лимит ${PLAYLIST_TRACK_LIMIT} треков. Переключаюсь на следующий плейлист...`);
+				
+				writable = await ensureWritablePlaylist(sc, playlistsState, rootState, {
+					...playlistProfile,
+					...currentProfile
+				});
+				currentProfile = writable.profile;
+				playlist = writable.playlist;
+				
+				stats.playlist.target_title = currentProfile.title || null;
+				stats.playlist.target_url = currentProfile.url || null;
+				stats.playlist.target_part = rootState.active_part || 1;
+				saveStats(stats);
+				
+				existingTracks = Array.isArray(playlist?.tracks) ? playlist.tracks : [];
+				existingSet = new Set(
+					existingTracks
+					.map((t) => safeNumericId(t) || safeResourceKey(t))
+					.filter(Boolean)
+				);
+				playlistTracks = existingTracks
+				.map((t) => ({
+					id: safeNumericId(t) ? Number(safeNumericId(t)) : null,
+					urn: safeResourceRef(t).urn || null
+				}))
+				.filter((t) => t.id || t.urn);
+				
+				log.info(`Продолжаю запись в плейлист: ${currentProfile.title}`);
+			}
+			
 			const trackIdNum = safeNumericId(item?.track);
 			const trackUrn = safeResourceRef(item?.track).urn || null;
 			
@@ -1054,11 +1310,11 @@ async function playlistFlow(sc, playlistProfile, foundCache, stats) {
 				urn: trackUrn
 			});
 			
-			await sc.updatePlaylistTracks(playlistProfile.key, playlistTracks, {
-				secretToken: playlistProfile.secret_token || null
+			await sc.updatePlaylistTracks(currentProfile.key, playlistTracks, {
+				secretToken: currentProfile.secret_token || null
 			});
 			
-			playlist = await sc.getPlaylist(playlistProfile.key);
+			playlist = await sc.getPlaylist(currentProfile.key);
 			if (!playlistContainsTrack(playlist, item?.track)) {
 				playlistTracks.pop();
 				throw new Error(
@@ -1076,6 +1332,9 @@ async function playlistFlow(sc, playlistProfile, foundCache, stats) {
 			stats.playlist.added += 1;
 			stats.playlist.processed += 1;
 			stats.playlist.last_index = i + 1;
+			stats.playlist.target_title = currentProfile.title || null;
+			stats.playlist.target_url = currentProfile.url || null;
+			stats.playlist.target_part = rootState.active_part || 1;
 			saveStats(stats);
 			
 			await sleep(1200);
@@ -1098,6 +1357,44 @@ async function playlistFlow(sc, playlistProfile, foundCache, stats) {
 			
 			if (status === 401 || /не авторизован/i.test(String(e?.message || ""))) {
 				throw new Error("Сессия истекла во время добавления в плейлист. Операция остановлена.");
+			}
+			
+			if (status === 422 && playlistTracks.length >= PLAYLIST_TRACK_LIMIT) {
+				log.warn(`Получен 422 на заполненном плейлисте "${currentProfile.title}". Переключение на новый плейлист.`);
+				if (playlistTracks.length) {
+					playlistTracks.pop();
+				}
+				
+				writable = await ensureWritablePlaylist(sc, playlistsState, rootState, {
+					...playlistProfile,
+					...currentProfile,
+					key: null,
+					id: null,
+					urn: null
+				});
+				currentProfile = writable.profile;
+				playlist = writable.playlist;
+				
+				existingTracks = Array.isArray(playlist?.tracks) ? playlist.tracks : [];
+				existingSet = new Set(
+					existingTracks
+					.map((t) => safeNumericId(t) || safeResourceKey(t))
+					.filter(Boolean)
+				);
+				playlistTracks = existingTracks
+				.map((t) => ({
+					id: safeNumericId(t) ? Number(safeNumericId(t)) : null,
+					urn: safeResourceRef(t).urn || null
+				}))
+				.filter((t) => t.id || t.urn);
+				
+				stats.playlist.target_title = currentProfile.title || null;
+				stats.playlist.target_url = currentProfile.url || null;
+				stats.playlist.target_part = rootState.active_part || 1;
+				saveStats(stats);
+				
+				bar.start(foundCache.found.length, i, { title: "" });
+				continue;
 			}
 			
 			if (playlistTracks.length) {
@@ -1164,8 +1461,11 @@ async function main() {
 	
 	let playlistProfile = null;
 	if (actionMode === "playlist") {
-		playlistProfile = await selectOrCreatePlaylist(sc);
-		log.info(`Выбран плейлист: ${playlistProfile.title} (${playlistProfile.url})`);
+		playlistProfile = buildAutoPlaylistProfile();
+		log.info(
+			`Режим авто-плейлистов: создаю новую серию плейлистов "${playlistProfile.title}" ` +
+			`с лимитом ${PLAYLIST_TRACK_LIMIT} треков на плейлист.`
+		);
 	}
 	
 	const tracksHash = sha256File(TRACKS_TXT);

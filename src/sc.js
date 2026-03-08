@@ -347,6 +347,38 @@ export class SoundCloudClient {
 		return form;
 	}
 	
+	async createPlaylist({ title, description = "", sharing = "private", tracks = [] }) {
+		if (!title || !String(title).trim()) {
+			throw new Error("Не указан title для создания плейлиста.");
+		}
+		
+		const normalizedTracks = this.normalizeTrackRefs(tracks);
+		
+		return await this.request(
+			{
+				method: "POST",
+				url: "/playlists",
+				data: {
+					playlist: {
+						title: String(title).trim(),
+						description: description == null ? "" : String(description),
+						sharing: sharing || "private",
+						tracks: normalizedTracks.map((track) => {
+							const item = {};
+							if (track.urn) item.urn = track.urn;
+							if (Number.isFinite(track.id)) item.id = track.id;
+							return item;
+						})
+					}
+				},
+				headers: {
+					"Content-Type": "application/json; charset=utf-8"
+				}
+			},
+			{ retryOn401: true }
+		);
+	}
+	
 	async updatePlaylistTracks(playlistRef, tracks, options = {}) {
 		const playlistKey = this.resolveResourceKey(playlistRef);
 		if (!playlistKey) {
