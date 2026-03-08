@@ -1,0 +1,134 @@
+07:53:47 [ R ] HTTP request
+{
+  "method": "GET",
+  "baseURL": "https://api.soundcloud.com",
+  "url": "/me",
+  "params": null,
+  "headers": {
+    "accept": "application/json; charset=utf-8",
+    "Authorization": "OAuth <hidden>"
+  },
+  "data": null
+}
+---
+07:53:47 [ R ] HTTP response
+{
+  "method": "GET",
+  "url": "/me",
+  "status": 200,
+  "statusText": "OK",
+  "data": {
+    "avatar_url": "https://i1.sndcdn.com/avatars-m3h7ydCUp439XmEG-8iScbQ-large.jpg",
+    "id": 1201168321,
+    "urn": "soundcloud:users:1201168321",
+    "kind": "user",
+    "permalink_url": "https://soundcloud.com/elecktro1337?utm_medium=api&utm_campaign=social_sharing&utm_source=id_327427",
+    "uri": "https://api.soundcloud.com/users/soundcloud:users:1201168321",
+    "username": "Nikita Shikhovtsev",
+    "permalink": "elecktro1337",
+    "created_at": "2022/12/24 09:59:21 +0000",
+    "last_modified": "2026/03/04 19:55:24 +0000",
+    "first_name": "Nikita",
+    "last_name": "Shikhovtsev",
+    "full_name": "Nikita Shikhovtsev",
+    "city": "Mineralnye Vody",
+    "description": null,
+    "country": "Russia",
+    "track_count": 1,
+    "public_favorites_count": 296,
+    "reposts_count": 0,
+    "followers_count": 1,
+    "followings_count": 1,
+    "plan": "Free",
+    "myspace_name": null,
+    "discogs_name": null,
+    "website_title": "TG",
+    "website": "https://t.me/elecktro1337",
+    "comments_count": 0,
+    "online": false,
+    "likes_count": 0,
+    "playlist_count": 1,
+    "subscriptions": [
+      {
+        "product": {
+          "id": "free",
+          "name": "Free"
+        }
+      }
+    ],
+    "quota": {
+      "unlimited_upload_quota": false,
+      "upload_seconds_used": 183,
+      "upload_seconds_left": 10617
+    },
+    "private_tracks_count": 0,
+    "private_playlists_count": 4,
+    "primary_email_confirmed": true,
+    "locale": "",
+    "upload_seconds_left": 10617
+  }
+}
+---
+07:53:51 [ R ] HTTP request
+{
+  "method": "GET",
+  "baseURL": "https://api.soundcloud.com",
+  "url": "/me/likes/tracks/soundcloud%3Atracks%3A2270113256",
+  "params": null,
+  "headers": {
+    "accept": "application/json; charset=utf-8",
+    "Authorization": "OAuth <hidden>"
+  },
+  "data": null
+}
+---
+07:53:51 [ R ] HTTP error
+{
+  "method": "GET",
+  "url": "/me/likes/tracks/soundcloud%3Atracks%3A2270113256",
+  "status": 405,
+  "statusText": "Method Not Allowed",
+  "requestHeaders": {
+    "accept": "application/json; charset=utf-8",
+    "Authorization": "OAuth <hidden>"
+  },
+  "params": null,
+  "data": null,
+  "responseData": "unknown route"
+}
+---
+07:53:51 [ R ] HTTP request
+{
+  "method": "POST",
+  "baseURL": "https://api.soundcloud.com",
+  "url": "/likes/tracks/soundcloud%3Atracks%3A2270113256",
+  "params": null,
+  "headers": {
+    "accept": "application/json; charset=utf-8",
+    "Authorization": "OAuth <hidden>"
+  },
+  "data": null
+}
+---
+07:53:52 [ R ] HTTP error
+{
+  "method": "POST",
+  "url": "/likes/tracks/soundcloud%3Atracks%3A2270113256",
+  "status": 429,
+  "statusText": "Too Many Requests",
+  "requestHeaders": {
+    "accept": "application/json; charset=utf-8",
+    "Authorization": "OAuth <hidden>"
+  },
+  "params": null,
+  "data": null,
+  "responseData": {
+    "code": 429,
+    "message": "",
+    "link": "https://developers.soundcloud.com/docs/api/rate-limits#errors",
+    "status": "429 - Too Many Requests",
+    "errors": [],
+    "error": null
+  }
+}
+---

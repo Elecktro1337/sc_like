@@ -1,0 +1,10 @@
+07:53:52 [ E ] Получен 429 при лайке. Немедленная остановка. Прогресс сохранен.
+{
+  "code": 429,
+  "message": "",
+  "link": "https://developers.soundcloud.com/docs/api/rate-limits#errors",
+  "status": "429 - Too Many Requests",
+  "errors": [],
+  "error": null
+}
+---

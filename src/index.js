@@ -1268,6 +1268,7 @@ async function playlistFlow(sc, playlistProfile, foundCache, stats) {
 		
 		try {
 			if (playlistTracks.length >= PLAYLIST_TRACK_LIMIT) {
+				bar.stop();
 				log.info(`Достигнут лимит ${PLAYLIST_TRACK_LIMIT} треков. Переключаюсь на следующий плейлист...`);
 				
 				writable = await ensureWritablePlaylist(sc, playlistsState, rootState, {
@@ -1296,6 +1297,7 @@ async function playlistFlow(sc, playlistProfile, foundCache, stats) {
 				.filter((t) => t.id || t.urn);
 				
 				log.info(`Продолжаю запись в плейлист: ${currentProfile.title}`);
+				bar.start(foundCache.found.length, i + 1, { title: "" });
 			}
 			
 			const trackIdNum = safeNumericId(item?.track);
@@ -1409,6 +1411,7 @@ async function playlistFlow(sc, playlistProfile, foundCache, stats) {
 	}
 	
 	bar.stop();
+	console.log("");
 	stats.playlist.finished = true;
 	saveStats(stats);
 	

@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-03-08T04:14:48.326Z",
+  "updated_at": "2026-03-08T04:53:52.060Z",
   "search": {
     "total_lines": 1373,
     "parsed_lines": 1373,
@@ -12,28 +12,28 @@
     "last_index": 1373
   },
   "likes": {
-    "total_found": 1080,
-    "processed": 243,
-    "liked": 24,
+    "total_found": 1085,
+    "processed": 0,
+    "liked": 0,
     "already_liked": 0,
-    "skipped_by_state": 219,
+    "skipped_by_state": 0,
     "errors": 1,
     "finished": false,
     "stopped_by_429": true,
-    "last_index": 244
+    "last_index": 1
   },
   "playlist": {
     "total_found": 1085,
-    "processed": 640,
-    "added": 638,
+    "processed": 1085,
+    "added": 1081,
     "already_in_playlist": 0,
-    "skipped_by_state": 2,
+    "skipped_by_state": 4,
     "errors": 0,
-    "finished": false,
+    "finished": true,
     "stopped_by_429": false,
-    "last_index": 640,
-    "target_title": "SC Like 2026-03-08 06:50:11 3",
-    "target_url": "https://soundcloud.com/elecktro1337/sets/sc-like-2026-03-08-06-50-11-3/s-J6uu6y8laua?utm_medium=api&utm_campaign=social_sharing&utm_source=id_327427",
-    "target_part": 3
+    "last_index": 1085,
+    "target_title": "SC Like 2026-03-08 06:50:11 5",
+    "target_url": "https://soundcloud.com/elecktro1337/sets/sc-like-2026-03-08-06-50-11-5/s-2R30xSHq3bk?utm_medium=api&utm_campaign=social_sharing&utm_source=id_327427",
+    "target_part": 5
   }
 }
